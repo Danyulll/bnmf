@@ -267,21 +267,38 @@ model {
 "
 )
 
+#' Fit a classic Bayesian non-negative matrix factorization with or without the iid assumption
+#'
+#' @param X a \eqn{m\times n} data matrix you wish to decompose.
+#' @param p the number of components to search for.
+#' @param A a \eqn{m\times p} matrix initialization for the mixing matrix \eqn{\mathbf{A}}.
+#' @param S a \eqn{p \times n} matrix initialization for the pure component matrix \eqn{\mathbf{S}}.
+#' @param A_dist a string indicating the distribution for A (one of "Gamma", "Exponential", or "Normal").
+#' @param S_dist a string indicating the distribution for A (one of "Gamma", "Exponential", or "Normal").
+#' @param likelihood a string indicating the distribution for the likelihood of the data (either "Normal" or "T").
+#' @param params a list of the hyperparameters for the distributions of \eqn{\mathbf{A}} and \eqn{\mathbf{S}}.
+#' @param n.chains an integer for the number of Markov chains you wish to generate.
+#' @param adapt an integer for the number of adaptation iterations you wish the Gibbs sampler to undergo.
+#' @param burnin an integer for the number of burn-in iterations you wish the Gibbs sampler to undergo.
+#' @param sample an integer indicating the number of samples you wish to generate.
+#' @param thin an integer indicating the thinning interval for the Markov chain.
+#' @param method a string indicating the method to run the Gibbs sampler with (see \link[runjags]{run.jags} for more information.)
+#' @param seed seeds for reproducibility of Markov chains. Must have as many seeds as there are chains.
 bnmf <- function(X,
                  p,
-                 n.chains = 4L,
-                 adapt = 1000,
-                 burnin = 5000,
-                 sample = 5000,
-                 thin = 500,
-                 method = "parallel",
-                 A = NULL,
-                 S = NULL,
+                 A = NA,
+                 S = NA,
                  A_dist = "Gamma",
                  S_dist = "Gamma",
                  likelihood = "Normal",
                  params = list(),
-                 seed = NULL) {
+                 n.chains = 4,
+                 adapt = 1000,
+                 burnin = 5000,
+                 sample = 5000,
+                 thin = 1,
+                 method = "simple",
+                 seed = NA) {
   if(is.data.frame(X))
     X <- data.matrix(X)
 
@@ -320,28 +337,32 @@ bnmf <- function(X,
     stop("Incorrect type in params")
 
   if (A_dist == "Gamma" &&
-      sum(c("a_alpha", "a_beta") %in% names(params)) != 2)
+      sum(c("alpha_a", "beta_a") %in% names(params)) != 2)
     stop("Incorret params or param names for A_dist")
   if (S_dist == "Gamma" &&
-      sum(c("s_alpha", "s_beta") %in% names(params)) != 2)
+      sum(c("alpha_s", "beta_s") %in% names(params)) != 2)
     stop("Incorret params or param names for S_dist")
 
-  if (A_dist == "Exponential" && !("a_lambda" %in% params))
+  if (A_dist == "Exponential" && !("lambda_a" %in% names(params)))
     stop("Incorret params or param names for A_dist")
-  if (S_dist == "Exponential" && !("s_lambda" %in% params))
+  if (S_dist == "Exponential" && !("lambda_s" %in% names(params)))
     stop("Incorret params or param names for S_dist")
 
   if (A_dist == "Normal" &&
-      sum(c("a_mu", "a_tau") %in% names(params)) != 2)
+      sum(c("mu_a", "tau_a") %in% names(params)) != 2)
     stop("Incorret params or param names for A_dist")
   if (S_dist == "Normal" &&
-      sum(c("s_mu", "s_tau") %in% names(params)) != 2)
+      sum(c("mu_s", "tau_s") %in% names(params)) != 2)
     stop("Incorret params or param names for S_dist")
 
-  if (is.null(A))
+  if(!is.na(seed) && length(seed) != n.chains)
+    stop("Incorrect number of seeds provided.")
+
+  if (is.na(A))
     A <- matrix(runif(m * p), nrow = m, ncol = p)
-  if (is.null(S))
+  if (is.na(S))
     S <- matrix(runif(n * p), nrow = p, ncol = n)
+
 
   data.list <-  c(list(
     X =  X,
@@ -351,29 +372,47 @@ bnmf <- function(X,
     E = 1 * 10 ^ -3
   ), params)
 
+  # List of RNGs
+  rng_list <- c("base::Wichmann-Hill", "base::Marsaglia-Multicarry", "base::Super-Duper", "base::Mersenne-Twister")
+
+  # Generate the inits for the specified number of chains
+  generate_inits <- function(num_chains, rng_list, seeds) {
+    inits <- list()
+    for (i in 1:num_chains) {
+      rng_name <- rng_list[((i - 1) %% length(rng_list)) + 1]
+      inits[[i]] <- runjags::dump.format(list(
+        A = A,
+        S = S,
+        .RNG.name = rng_name,
+        .RNG.seed = seeds[i]
+      ))
+    }
+    return(inits)
+  }
+
   inits1 <-
-    dump.format(list(
+    runjags::dump.format(list(
       A = A,
       S = S,
       .RNG.name = "base::Wichmann-Hill",
       .RNG.seed = seed
     ))
   inits2 <-
-    dump.format(list(
+    runjags::dump.format(list(
       A = A,
       S = S,
       .RNG.name = "base::Marsaglia-Multicarry",
       .RNG.seed = seed
     ))
   inits3 <-
-    dump.format(list(
+    runjags::dump.format(list(
       A = A,
       S = S,
       .RNG.name = "base::Super-Duper",
       .RNG.seed = seed
     ))
   inits4 <-
-    dump.format(list(
+    runjags::dump.format(list(
       A = A,
       S = S,
       .RNG.name = "base::Mersenne-Twister",
@@ -389,7 +428,7 @@ bnmf <- function(X,
     "Normal_Gamma" = models$S_gamma_A_half_norm
   )
 
-  posterior <- run.jags(
+  posterior <- runjags::run.jags(
     model = model,
     data = data.list,
     monitor = c("A","S"),
